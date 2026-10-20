@@ -1,0 +1,15 @@
+#!/bin/bash
+# App-Architect Launcher Script
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CACHE_DIR="${CACHE_DIR:-$DIR/cache}"
+export HF_HOME="${HF_HOME:-$CACHE_DIR/huggingface}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$CACHE_DIR/huggingface/hub}"
+export TORCH_HOME="${TORCH_HOME:-$CACHE_DIR/torch}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$CACHE_DIR}"
+
+PYTHON_BIN="python"
+if [ -f "$DIR/.venv/bin/python" ]; then
+    PYTHON_BIN="$DIR/.venv/bin/python"
+fi
+
+exec "$PYTHON_BIN" "$DIR/app_architect.py" "$@"

@@ -1,0 +1,78 @@
+# ==============================================================================
+# GITIGNORE - 3D SCENE UNDERSTANDING & ARCHITECTURE STUDIO
+# ==============================================================================
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+.bin/
+
+# Python caches & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.manifest
+*.spec
+
+# Model weights, huggingface & torch caches (crucial: avoid pushing tens of GBs)
+cache/
+.cache/
+torch_extensions/
+*.bin
+*.safetensors
+*.ckpt
+
+# Heavy video files, dense cache & point cloud binary dumps
+data/*.mp4
+data/*.mov
+data/*.avi
+data/*.mkv
+data/*.pt
+data/*.ply
+data/*.npy
+data/scene_cache*.pt
+data/vggt_cache.pt
+data/trained_3dgs.*
+data/custom_frames/
+data/custom_frames_old/
+data/sample_new_frames/
+data/depth_maps/
+data/depth_maps_old/
+
+# Preserve lightweight preview outputs for documentation
+!data/archicad_sample.png
+!data/test_projected_plan.png
+!data/test_topdown_orthophoto.png
+!data/.gitkeep
+
+# IDE & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs & temp files
+*.log
+logs/
+.system_generated/

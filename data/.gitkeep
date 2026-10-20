@@ -1,0 +1,2 @@
+# This folder stores local scene caches, point clouds, and extracted video frames.
+# Heavy binary data is ignored via .gitignore.
