@@ -13,16 +13,22 @@ Système de **reconstruction 3D métrique, d'estimation de plans d'architecte (s
 ## ✨ Fonctionnalités Principales
 
 ### 1. 📐 App-Architect : Studio de Relevé & Plans d'Étage (Port 8081)
+- **Moteur Vectoriel Manhattan-World RANSAC (Angles 90°)** : Extraction automatique de murs orthogonaux stricts et fermés à partir de la coupe horizontale du nuage de points 3D.
+- **Épaisseur de murs structurels (20 cm)** : Génération automatique des doubles parois intérieures/extérieures conformes aux normes d'architecture.
+- **Exports DAO / CAD 1-Clic** :
+  - `💾 Export DXF` : Format AutoCAD R12 standard directement importable dans **ArchiCAD, AutoCAD, Revit, SketchUp, LibreCAD**.
+  - `💾 Export SVG` : Graphisme vectoriel pur haute définition pour le web et l'illustration.
+  - `💾 Export PNG HD` : Rendu de planche d'architecte 1500×1100 avec cartouche et cotations.
 - **Projection 3D directe au sol (Vue Orthophoto Réelle)** : Projection orthogonale des 15 millions de points 3D pour voir la vraie pièce vue du dessus (textures réelles du sol, forme exacte du lit, bureau, ouvertures).
 - **Cotations d'architecte automatiques** : Chaînes de côtes professionnelles avec traits à 45° et lignes de rappel mesurant la largeur totale, longueur totale et surface en m².
-- **Modes de rendu d'étage** :
-  - `📸 Projection 3D Réelle` (Orthophoto RGB haute fidélité)
+- **Modes de rendu d'étage commutables** :
+  - `📸 Hybride : Murs Vectoriels + 3D Réelle` (Le meilleur des deux mondes : photo 3D + traits CAD nets)
+  - `📐 Plan Vectoriel Pur ArchiCAD` (Murs noirs structurels sur fond blanc vectoriel)
+  - `📸 Projection 3D Seule` (Orthophoto RGB haute fidélité)
   - `📡 Scanner Laser` (Coloration spectrale par hauteur de points)
   - `🔵 Blueprint CAD` (Style tirage de plan bleu technique)
-  - `📐 Plan Vectoriel Schématique` (Style ArchiCAD papier blanc)
 - **Visionneuse de profondeur & Multi-vues** : Inspection instantanée des 80 caméras avec affichage synchronisé de l'image RGB et de sa carte de profondeur métrique colorisée (colormap Turbo).
 - **Alignement 3D "Vue du dessus"** : Bouton 1-clic pour orienter instantanément la caméra 3D interactive au plafond face au sol.
-- **Export 1-clic** : Téléchargement direct du plan au format PNG haute résolution (1500×1100).
 
 ### 2. 🎮 3D Scene Navigator & FPS Walk (Port 8080)
 - **Rendu photoréaliste 3D** : Affichage temps réel de nuages de points denses et de **3D Gaussian Splatting (3DGS)** via `gsplat`.

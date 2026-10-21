@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from src.architect.vector_floorplan import VectorFloorplanResult, ManhattanVectorFloorplan
+
 
 class BlueprintRenderer:
     def __init__(self, canvas_width: int = 1500, canvas_height: int = 1100):
@@ -30,19 +32,25 @@ class BlueprintRenderer:
         ceiling_height_m: float = 2.50,
         door_info: Optional[Dict] = None,
         window_info: Optional[Dict] = None,
-        style: str = "archicad",                        # 'ortho', 'archicad', 'blueprint', or 'scanner'
+        style: str = "archicad",                        # 'hybrid', 'pure_vector', 'ortho', 'archicad', 'blueprint', or 'scanner'
         scanner_points_m: Optional[np.ndarray] = None,  # (N, 2) horizontal slice points
         projected_points_m: Optional[np.ndarray] = None,# (N, 3) 3D points aligned with floor plane [x, y, z] in meters
         projected_colors: Optional[np.ndarray] = None,  # (N, 3) Point colors [0, 1] or [0, 255]
+        vector_result: Optional[VectorFloorplanResult] = None, # Exact Manhattan-World vector result
         project_name: str = "RELEVÉ ARCHITECTURAL & PLAN CAD",
         room_name: str = "CHAMBRE / STUDIO",
     ) -> np.ndarray:
         """
         Renders a high-resolution, photorealistic CAD floor plan derived directly
-        from the 3D point cloud projected onto the ground plane.
+        from the 3D point cloud projected onto the ground plane and/or Manhattan RANSAC vectors.
         """
-        # If dense 3D points are provided, derive exact room bounds directly from the 3D point cloud
-        if projected_points_m is not None and len(projected_points_m) > 100:
+        if vector_result is not None:
+            min_xm, max_xm, min_ym, max_ym = vector_result.bounding_box_m
+            total_width_m = vector_result.total_width_m
+            total_length_m = vector_result.total_length_m
+            area_m2 = vector_result.area_m2
+            perimeter_m = vector_result.perimeter_m
+        elif projected_points_m is not None and len(projected_points_m) > 100:
             # Filter points within valid architectural height range (above floor, below ceiling)
             zm = projected_points_m[:, 2]
             valid_mask = (zm >= 0.02) & (zm <= ceiling_height_m - 0.15)
@@ -56,16 +64,21 @@ class BlueprintRenderer:
             max_xm = float(np.percentile(xv, 99.6))
             min_ym = float(np.percentile(yv, 0.4))
             max_ym = float(np.percentile(yv, 99.6))
+            total_width_m = max(1.0, max_xm - min_xm)
+            total_length_m = max(1.0, max_ym - min_ym)
+            area_m2 = total_width_m * total_length_m
+            perimeter_m = 2.0 * (total_width_m + total_length_m)
         else:
             poly_m = np.array(room_polygon_m, dtype=np.float32)
             if len(poly_m) < 3:
                 poly_m = np.array([[-1.5, -1.0], [1.2, -1.0], [1.2, 4.5], [-1.5, 4.5]], dtype=np.float32)
             min_xm, min_ym = float(np.min(poly_m[:, 0])), float(np.min(poly_m[:, 1]))
             max_xm, max_ym = float(np.max(poly_m[:, 0])), float(np.max(poly_m[:, 1]))
+            total_width_m = max(1.0, max_xm - min_xm)
+            total_length_m = max(1.0, max_ym - min_ym)
+            area_m2 = total_width_m * total_length_m
+            perimeter_m = 2.0 * (total_width_m + total_length_m)
 
-        total_width_m = max(1.0, max_xm - min_xm)
-        total_length_m = max(1.0, max_ym - min_ym)
-        area_m2 = total_width_m * total_length_m
         volume_m3 = area_m2 * ceiling_height_m
 
         # Styling palettes
@@ -199,10 +212,22 @@ class BlueprintRenderer:
 
             has_projection = True
 
-        # Draw structural wall outline around the room
-        p1 = to_px(min_xm, min_ym)
-        p2 = to_px(max_xm, max_ym)
-        cv2.rectangle(img, (p1[0], p2[1]), (p2[0], p1[1]), wall_line, 3)
+        # Draw structural walls (Manhattan Vector or Bounding Outline)
+        if vector_result is not None:
+            in_pts = np.array([to_px(x, y) for x, y in vector_result.corners], dtype=np.int32)
+            ex_pts = np.array([to_px(x, y) for x, y in vector_result.exterior_corners], dtype=np.int32)
+
+            # Draw outer structural wall thickness
+            cv2.fillPoly(img, [ex_pts], wall_fill)
+            if not has_projection or style == "pure_vector":
+                cv2.fillPoly(img, [in_pts], bg_color)
+
+            cv2.polylines(img, [ex_pts], True, wall_line, 3, cv2.LINE_AA)
+            cv2.polylines(img, [in_pts], True, wall_line, 2, cv2.LINE_AA)
+        else:
+            p1 = to_px(min_xm, min_ym)
+            p2 = to_px(max_xm, max_ym)
+            cv2.rectangle(img, (p1[0], p2[1]), (p2[0], p1[1]), wall_line, 3)
 
         # If dense 3D projection is active, overlay sleek architectural labels on real objects
         if has_projection:

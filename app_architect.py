@@ -40,6 +40,7 @@ import viser
 import viser.transforms as viser_tf
 
 from src.architect.blueprint_renderer import BlueprintRenderer
+from src.architect.vector_floorplan import ManhattanVectorFloorplan, VectorFloorplanResult
 
 
 def make_architect_hud_html(blueprint_img: np.ndarray, area_m2: float, hsp_m: float, vol_m3: float) -> str:
@@ -211,8 +212,9 @@ def run_architect_app(
         )
         cam_handles.append(h)
 
-    # Blueprint Renderer instance
+    # Blueprint Renderer & Manhattan Vectorizer instances
     renderer = BlueprintRenderer(canvas_width=1500, canvas_height=1100)
+    vector_engine = ManhattanVectorFloorplan(slice_z_min=-0.80, slice_z_max=2.20)
 
     current_scale = 2.50
     current_hsp = 2.50
@@ -304,12 +306,13 @@ def run_architect_app(
         style_dropdown = server.gui.add_dropdown(
             "Mode de Rendu du Plan",
             options=[
-                "Projection 3D Réelle (Orthophoto Sol)",
+                "Hybride : Murs Vectoriels + 3D Réelle",
+                "Plan Vectoriel Pur ArchiCAD (Manhattan RANSAC)",
+                "Projection 3D Seule (Orthophoto Sol)",
                 "Scanner Laser (Hauteurs Colorées)",
                 "Blueprint CAD (Bleu Foncé)",
-                "Plan Vectoriel Schématique",
             ],
-            initial_value="Projection 3D Réelle (Orthophoto Sol)",
+            initial_value="Hybride : Murs Vectoriels + 3D Réelle",
         )
 
         btn_view_topdown = server.gui.add_button(
@@ -317,8 +320,17 @@ def run_architect_app(
             color="green",
         )
 
+        server.gui.add_markdown("**Exports Vectoriels & DAO :**")
+        btn_download_dxf = server.gui.add_button(
+            "💾 Télécharger Plan CAD (.DXF pour ArchiCAD / AutoCAD)",
+            color="green",
+        )
+        btn_download_svg = server.gui.add_button(
+            "💾 Télécharger Plan Vectoriel (.SVG)",
+            color="blue",
+        )
         btn_download_plan = server.gui.add_button(
-            "💾 Télécharger Plan HD (PNG Haute-Résolution)",
+            "💾 Télécharger Plan Image (.PNG HD)",
             color="red",
         )
 
@@ -387,6 +399,8 @@ def run_architect_app(
     # Core Dimension & Blueprint Calculation Function
     # -------------------------------------------------------------------------
     current_blueprint_png: List[bytes] = [b""]
+    current_dxf_bytes: List[bytes] = [b""]
+    current_svg_bytes: List[bytes] = [b""]
     hud_handle = [server.gui.add_markdown("")]
 
     def update_architectural_scene():
@@ -399,8 +413,10 @@ def run_architect_app(
             render_style = "blueprint"
         elif "Scanner" in raw_style_str:
             render_style = "scanner"
-        elif "Vectoriel" in raw_style_str:
-            render_style = "archicad"
+        elif "Pur" in raw_style_str:
+            render_style = "pure_vector"
+        elif "Hybride" in raw_style_str:
+            render_style = "hybrid"
         else:
             render_style = "ortho"
 
@@ -410,30 +426,20 @@ def run_architect_app(
         projected_pts_m[:, 1] = aligned_all[:, 1] * scale
         projected_pts_m[:, 2] = (aligned_all[:, 2] - ground_z_unscaled) * scale
 
-        # Direct derivation of exact metric room bounds from the 3D point cloud
-        zm = projected_pts_m[:, 2]
-        valid_mask = (zm >= 0.02) & (zm <= hsp - 0.15)
-        if np.sum(valid_mask) > 100:
-            xv = projected_pts_m[valid_mask, 0]
-            yv = projected_pts_m[valid_mask, 1]
-        else:
-            xv = projected_pts_m[:, 0]
-            yv = projected_pts_m[:, 1]
+        # Manhattan-World RANSAC orthogonal vector floorplan extraction
+        vector_res = vector_engine.extract_vector_floorplan(projected_pts_m, ceiling_height_m=hsp)
 
-        min_xm = float(np.percentile(xv, 0.4))
-        max_xm = float(np.percentile(xv, 99.6))
-        min_ym = float(np.percentile(yv, 0.4))
-        max_ym = float(np.percentile(yv, 99.6))
-        span_w = max_xm - min_xm
-        span_l = max_ym - min_ym
-        area = span_w * span_l
+        min_xm, max_xm, min_ym, max_ym = vector_res.bounding_box_m
+        span_w = vector_res.total_width_m
+        span_l = vector_res.total_length_m
+        area = vector_res.area_m2
         volume = area * hsp
+        perimeter = vector_res.perimeter_m
 
         # Scale polygon vertices to meters for 3D overlay
-        poly_m = [(x * scale, y * scale) for x, y in poly_unscaled]
-        poly_arr_m = np.array(poly_m, dtype=np.float32)
+        poly_m = vector_res.corners
 
-        # 1. Update Markdown Table
+        # 1. Update Markdown Table with exact CAD metrics
         metrics_markdown.content = (
             f"| Paramètre Architectural | Mesure Réelle Estimée |\n"
             f"| :--- | :--- |\n"
@@ -442,7 +448,8 @@ def run_architect_app(
             f"| 📐 **Hauteur Sous Plafond (HSP)** | **`{hsp:.2f} m`** |\n"
             f"| 🏢 **Surface Habitable Nette (S)** | **`{area:.2f} m²`** |\n"
             f"| 📦 **Volume Intérieur (V)** | **`{volume:.1f} m³`** |\n"
-            f"| 🧱 **Murs & Cloisons** | **`Forme en L (Alvôve lit + Entrée)`** |\n"
+            f"| 🧱 **Périmètre des Murs** | **`{perimeter:.2f} m`** |\n"
+            f"| 📐 **Moteur Vectoriel CAD** | **`Manhattan RANSAC (Angles 90°)`** |\n"
             f"| 🚪 **Menuiseries Intégrées** | **`1 Porte (0.80m) + 1 Fenêtre (1.40m)`** |"
         )
 
@@ -495,13 +502,14 @@ def run_architect_app(
 
         # 3. 3D Structural Real Walls & Dimensions
         if cb_show_3d_dims.value:
-            # Draw real wall contours in 3D around the room polygon!
+            # Draw real Manhattan orthogonal wall contours in 3D around the room!
             wall_segments_3d = []
-            for i in range(len(poly_unscaled)):
-                p1_un = poly_unscaled[i]
-                p2_un = poly_unscaled[(i + 1) % len(poly_unscaled)]
-                pt1_3d = r_inv @ np.array([p1_un[0], p1_un[1], ground_z_unscaled + 0.04])
-                pt2_3d = r_inv @ np.array([p2_un[0], p2_un[1], ground_z_unscaled + 0.04])
+            n_c = len(vector_res.corners)
+            for i in range(n_c):
+                p1_un = vector_res.corners[i]
+                p2_un = vector_res.corners[(i + 1) % n_c]
+                pt1_3d = r_inv @ np.array([p1_un[0] / scale, p1_un[1] / scale, ground_z_unscaled + 0.04])
+                pt2_3d = r_inv @ np.array([p2_un[0] / scale, p2_un[1] / scale, ground_z_unscaled + 0.04])
                 wall_segments_3d.append([pt1_3d, pt2_3d])
 
                 # Upper wall header line
@@ -536,7 +544,7 @@ def run_architect_app(
                 visible=True,
             )
 
-            p_corner = r_inv @ np.array([poly_unscaled[0][0], poly_unscaled[0][1], ground_z_unscaled])
+            p_corner = r_inv @ np.array([vector_res.corners[0][0] / scale, vector_res.corners[0][1] / scale, ground_z_unscaled])
             server.scene.add_label(
                 "/dimensions/label_hsp",
                 text=f"📐 HSP : {hsp:.2f} m",
@@ -549,24 +557,35 @@ def run_architect_app(
             server.scene.remove_by_name("/dimensions/label_length")
             server.scene.remove_by_name("/dimensions/label_hsp")
 
-        # 4. Render Authentic ArchiCAD 2D Blueprint with direct 3D Ground Projection
+        # 4. Render Authentic ArchiCAD 2D Blueprint with Manhattan Vector Extraction
         scanner_pts_m = scanner_slice_unscaled * scale if render_style == "scanner" else None
 
         blueprint_img = renderer.render_blueprint(
-            room_polygon_m=poly_m,
+            room_polygon_m=vector_res.corners,
             objects=objects_for_blueprint,
             ceiling_height_m=hsp,
             style=render_style,
             scanner_points_m=scanner_pts_m,
             projected_points_m=projected_pts_m,
             projected_colors=pcd_cols,
+            vector_result=vector_res,
             project_name="RELEVÉ ARCHITECTURAL & PLAN CAD",
             room_name="CHAMBRE / STUDIO",
         )
 
-        # Cache PNG bytes for 1-click download
+        # Cache PNG, DXF and SVG bytes for 1-click download
         _, png_buf = cv2.imencode(".png", blueprint_img)
         current_blueprint_png[0] = png_buf.tobytes()
+
+        dxf_path = ROOT_DIR / "data" / "plan_architectural.dxf"
+        vector_engine.export_dxf(vector_res, dxf_path, objects=objects_for_blueprint, ceiling_height_m=hsp)
+        if dxf_path.exists():
+            current_dxf_bytes[0] = dxf_path.read_bytes()
+
+        svg_path = ROOT_DIR / "data" / "plan_architectural.svg"
+        vector_engine.export_svg(vector_res, svg_path, objects=objects_for_blueprint, ceiling_height_m=hsp)
+        if svg_path.exists():
+            current_svg_bytes[0] = svg_path.read_bytes()
 
         # Update GUI Preview
         small_preview = cv2.resize(blueprint_img, (420, 308), interpolation=cv2.INTER_AREA)
@@ -682,6 +701,34 @@ def run_architect_app(
                 current_blueprint_png[0],
             )
             print("[Architect] Plan architectural PNG envoyé pour téléchargement client.")
+
+    @btn_download_dxf.on_click
+    def _(event: viser.GuiEvent):
+        target_client = event.client
+        if target_client is None:
+            clients = list(server.get_clients().values())
+            target_client = clients[0] if clients else None
+
+        if target_client is not None and len(current_dxf_bytes[0]) > 0:
+            target_client.send_file_download(
+                "Plan_Architectural_ArchiCAD.dxf",
+                current_dxf_bytes[0],
+            )
+            print("[Architect] Plan architectural DXF (AutoCAD/ArchiCAD) envoyé pour téléchargement client.")
+
+    @btn_download_svg.on_click
+    def _(event: viser.GuiEvent):
+        target_client = event.client
+        if target_client is None:
+            clients = list(server.get_clients().values())
+            target_client = clients[0] if clients else None
+
+        if target_client is not None and len(current_svg_bytes[0]) > 0:
+            target_client.send_file_download(
+                "Plan_Architectural_Vectoriel.svg",
+                current_svg_bytes[0],
+            )
+            print("[Architect] Plan architectural vectoriel SVG envoyé pour téléchargement client.")
 
     @btn_view_topdown.on_click
     def _(event: viser.GuiEvent):

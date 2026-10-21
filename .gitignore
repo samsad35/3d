@@ -48,6 +48,8 @@ data/*.mkv
 data/*.pt
 data/*.ply
 data/*.npy
+data/*.dxf
+data/*.svg
 data/scene_cache*.pt
 data/vggt_cache.pt
 data/trained_3dgs.*
