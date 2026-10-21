@@ -267,7 +267,15 @@ def run_architect_app(
             min=0.005,
             max=0.035,
             step=0.002,
-            initial_value=0.012,
+            initial_value=0.010,
+        )
+
+        slider_point_density = server.gui.add_slider(
+            "Densité Nuage 3D (Nombre de Points)",
+            min=200000,
+            max=2000000,
+            step=100000,
+            initial_value=800000,
         )
 
     # =========================================================================
@@ -286,6 +294,16 @@ def run_architect_app(
                 "Blueprint CAD (Bleu Foncé)",
             ],
             initial_value="Hybride : Murs Vectoriels + 3D Réelle",
+        )
+
+        resolution_dropdown = server.gui.add_dropdown(
+            "Résolution d'Export du Plan 2D",
+            options=[
+                "Ultra-HD 2K (2400 × 1760) [Recommandé]",
+                "Grand Format 4K (3200 × 2350)",
+                "Standard HD (1600 × 1170)",
+            ],
+            initial_value="Ultra-HD 2K (2400 × 1760) [Recommandé]",
         )
 
         btn_view_topdown = server.gui.add_button(
@@ -310,8 +328,8 @@ def run_architect_app(
         cb_show_hud = server.gui.add_checkbox("📌 Afficher le Plan Fixe (HUD Top-Left)", initial_value=True)
 
         preview_cad_img = server.gui.add_image(
-            np.zeros((300, 420, 3), dtype=np.uint8),
-            label="Aperçu CAD",
+            np.zeros((470, 640, 3), dtype=np.uint8),
+            label="Aperçu CAD Haute Résolution",
             format="png",
         )
 
@@ -399,8 +417,22 @@ def run_architect_app(
         projected_pts_m[:, 1] = pts_canonical[:, 1] * scale
         projected_pts_m[:, 2] = (pts_canonical[:, 2] - z_ground_canonical) * scale
 
-        # Update 3D Point Cloud in Viser
-        sub_pts = projected_pts_m[::step]
+        # Determine 2D canvas resolution
+        raw_res = resolution_dropdown.value
+        if "4K" in raw_res:
+            c_w, c_h = 3200, 2350
+        elif "Standard" in raw_res:
+            c_w, c_h = 1600, 1170
+        else:
+            c_w, c_h = 2400, 1760
+
+        renderer.canvas_width = c_w
+        renderer.canvas_height = c_h
+
+        # Update 3D Point Cloud in Viser with user-chosen density
+        num_target_pts = int(slider_point_density.value)
+        step_viser = max(1, total_pts // num_target_pts)
+        sub_pts = projected_pts_m[::step_viser]
         pcd_handle.points = sub_pts
 
         # Manhattan-World RANSAC orthogonal vector floorplan extraction
@@ -567,8 +599,8 @@ def run_architect_app(
         if svg_path.exists():
             current_svg_bytes[0] = svg_path.read_bytes()
 
-        # Update GUI Preview
-        small_preview = cv2.resize(blueprint_img, (420, 308), interpolation=cv2.INTER_AREA)
+        # Update GUI Preview with sharp 640x469 resolution
+        small_preview = cv2.resize(blueprint_img, (640, 469), interpolation=cv2.INTER_AREA)
         preview_cad_img.image = cv2.cvtColor(small_preview, cv2.COLOR_BGR2RGB)
 
         # Update Floating Top-Left HUD
@@ -642,6 +674,14 @@ def run_architect_app(
         update_architectural_scene()
 
     @style_dropdown.on_update
+    def _(_):
+        update_architectural_scene()
+
+    @resolution_dropdown.on_update
+    def _(_):
+        update_architectural_scene()
+
+    @slider_point_density.on_update
     def _(_):
         update_architectural_scene()
 

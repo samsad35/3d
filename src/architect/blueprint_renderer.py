@@ -21,7 +21,7 @@ from src.architect.vector_floorplan import VectorFloorplanResult, ManhattanVecto
 
 
 class BlueprintRenderer:
-    def __init__(self, canvas_width: int = 1500, canvas_height: int = 1100):
+    def __init__(self, canvas_width: int = 2400, canvas_height: int = 1760):
         self.canvas_width = canvas_width
         self.canvas_height = canvas_height
 
@@ -32,7 +32,7 @@ class BlueprintRenderer:
         ceiling_height_m: float = 2.50,
         door_info: Optional[Dict] = None,
         window_info: Optional[Dict] = None,
-        style: str = "archicad",                        # 'hybrid', 'pure_vector', 'ortho', 'archicad', 'blueprint', or 'scanner'
+        style: str = "hybrid",                          # 'hybrid', 'pure_vector', 'ortho', 'archicad', 'blueprint', or 'scanner'
         scanner_points_m: Optional[np.ndarray] = None,  # (N, 2) horizontal slice points
         projected_points_m: Optional[np.ndarray] = None,# (N, 3) 3D points aligned with floor plane [x, y, z] in meters
         projected_colors: Optional[np.ndarray] = None,  # (N, 3) Point colors [0, 1] or [0, 255]
@@ -44,6 +44,8 @@ class BlueprintRenderer:
         Renders a high-resolution, photorealistic CAD floor plan derived directly
         from the 3D point cloud projected onto the ground plane and/or Manhattan RANSAC vectors.
         """
+        scale_factor = self.canvas_width / 1500.0
+
         if vector_result is not None:
             min_xm, max_xm, min_ym, max_ym = vector_result.bounding_box_m
             total_width_m = vector_result.total_width_m
@@ -108,23 +110,23 @@ class BlueprintRenderer:
             furniture_pen = (251, 191, 36)
         else:  # 'archicad' or 'ortho': Clean architectural bond paper
             bg_color = (252, 252, 252)       # Pure architectural paper
-            grid_color = (235, 238, 242)     # CAD faint grid
-            wall_fill = (45, 55, 72)         # Architectural solid wall fill (slate)
-            wall_line = (15, 23, 42)         # Deep dark ink
+            grid_color = (235, 238, 242)
+            wall_fill = (45, 55, 72)          # Dark architectural structural fill
+            wall_line = (15, 23, 42)
             text_color = (15, 23, 42)
-            dim_color = (185, 28, 28)        # Dimension ruby red
+            dim_color = (185, 28, 28)        # Deep architectural red
             dim_sub = (148, 163, 184)
             cartouche_bg = (255, 255, 255)
             cartouche_border = (15, 23, 42)
-            furniture_pen = (37, 99, 235)    # Blueprint blue lines for furniture
+            furniture_pen = (37, 99, 235)
 
         img = np.full((self.canvas_height, self.canvas_width, 3), bg_color, dtype=np.uint8)
 
-        # Coordinate mapping setup with margins for dimension chains
-        margin_x = 240
-        margin_y = 190
+        # Coordinate mapping setup with scaled margins for dimension chains
+        margin_x = int(240 * scale_factor)
+        margin_y = int(190 * scale_factor)
         avail_w = self.canvas_width - 2 * margin_x
-        avail_h = self.canvas_height - 2 * margin_y - 80
+        avail_h = self.canvas_height - 2 * margin_y - int(80 * scale_factor)
 
         px_per_m = min(avail_w / total_width_m, avail_h / total_length_m)
         draw_w = total_width_m * px_per_m
@@ -138,7 +140,7 @@ class BlueprintRenderer:
             py = int(off_y + (max_ym - ym) * px_per_m)  # Y up in architectural drawings
             return px, py
 
-        wall_thick_px = max(7, int(0.20 * px_per_m))
+        wall_thick_px = max(int(7 * scale_factor), int(0.20 * px_per_m))
 
         # ---------------------------------------------------------------------
         # 1. Subtle Metric CAD Grid (every 0.5m)
@@ -146,13 +148,13 @@ class BlueprintRenderer:
         grid_step = 0.5
         for gx in np.arange(math.floor(min_xm) - 1.0, math.ceil(max_xm) + 1.5, grid_step):
             px, _ = to_px(gx, min_ym)
-            if 40 <= px < self.canvas_width - 40:
-                cv2.line(img, (px, 50), (px, self.canvas_height - 130), grid_color, 1)
+            if int(40 * scale_factor) <= px < self.canvas_width - int(40 * scale_factor):
+                cv2.line(img, (px, int(50 * scale_factor)), (px, self.canvas_height - int(130 * scale_factor)), grid_color, 1)
 
         for gy in np.arange(math.floor(min_ym) - 1.0, math.ceil(max_ym) + 1.5, grid_step):
             _, py = to_px(min_xm, gy)
-            if 40 <= py < self.canvas_height - 40:
-                cv2.line(img, (50, py), (self.canvas_width - 50, py), grid_color, 1)
+            if int(40 * scale_factor) <= py < self.canvas_height - int(40 * scale_factor):
+                cv2.line(img, (int(50 * scale_factor), py), (self.canvas_width - int(50 * scale_factor), py), grid_color, 1)
 
         # ---------------------------------------------------------------------
         # 2. REAL 3D POINT CLOUD PROJECTION ONTO FLOOR PLANE (ORTHOPHOTO)
@@ -172,8 +174,9 @@ class BlueprintRenderer:
             else:
                 cv = np.full((len(xv), 3), 180, dtype=np.uint8)
 
-            # Subsample to ~1.2M points for smooth splatting
-            step = max(1, len(xv) // 1200000)
+            # Subsample up to 2.5M points for high-density sharp rendering
+            target_max_pts = int(2200000 * min(2.0, max(1.0, scale_factor)))
+            step = max(1, len(xv) // target_max_pts)
             xv_s = xv[::step]
             yv_s = yv[::step]
             zv_s = zv[::step]
@@ -204,15 +207,19 @@ class BlueprintRenderer:
                 # True RGB colors from the 3D reconstruction
                 bgr = cv_s[:, ::-1]
 
-            # Continuous 2x2 splatting
-            for dx in (0, 1):
-                for dy in (0, 1):
+            # High-resolution continuous splatting
+            splat_size = 3 if scale_factor >= 1.4 else 2
+            for dx in range(splat_size):
+                for dy in range(splat_size):
                     img[np.clip(pys + dy, 0, self.canvas_height - 1),
                         np.clip(pxs + dx, 0, self.canvas_width - 1)] = bgr
 
             has_projection = True
 
         # Draw structural walls (Manhattan Vector or Bounding Outline)
+        line_w_thick = max(2, int(round(3 * scale_factor)))
+        line_w_thin = max(1, int(round(2 * scale_factor)))
+
         if vector_result is not None:
             in_pts = np.array([to_px(x, y) for x, y in vector_result.corners], dtype=np.int32)
             ex_pts = np.array([to_px(x, y) for x, y in vector_result.exterior_corners], dtype=np.int32)
@@ -227,14 +234,16 @@ class BlueprintRenderer:
             if not has_projection or style == "pure_vector":
                 cv2.fillPoly(img, [in_pts], bg_color)
 
-            cv2.polylines(img, [ex_pts], True, wall_line, 3, cv2.LINE_AA)
-            cv2.polylines(img, [in_pts], True, wall_line, 2, cv2.LINE_AA)
+            cv2.polylines(img, [ex_pts], True, wall_line, line_w_thick, cv2.LINE_AA)
+            cv2.polylines(img, [in_pts], True, wall_line, line_w_thin, cv2.LINE_AA)
         else:
             p1 = to_px(min_xm, min_ym)
             p2 = to_px(max_xm, max_ym)
-            cv2.rectangle(img, (p1[0], p2[1]), (p2[0], p1[1]), wall_line, 3)
+            cv2.rectangle(img, (p1[0], p2[1]), (p2[0], p1[1]), wall_line, line_w_thick)
 
-        # If dense 3D projection is active, overlay sleek architectural labels on real objects
+        # Overlay sleek architectural labels on real objects
+        f_scale_obj = 0.46 * scale_factor
+        f_scale_obj_sub = 0.38 * scale_factor
         if has_projection:
             for obj in objects:
                 lbl = obj.get("label", "").lower()
@@ -247,21 +256,20 @@ class BlueprintRenderer:
                 bx, by = min(tl[0], br[0]), min(tl[1], br[1])
                 bw, bh = abs(br[0] - tl[0]), abs(br[1] - tl[1])
 
-                if bw > 15 and bh > 15:
+                if bw > int(15 * scale_factor) and bh > int(15 * scale_factor):
                     if "bed" in lbl or "lit" in lbl:
-                        cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (37, 99, 235), 2)
-                        cv2.putText(img, f"LIT ({wm:.2f} x {lm:.2f} m)", (bx + 8, by + 20),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (37, 99, 235), 2, cv2.LINE_AA)
+                        cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (37, 99, 235), line_w_thin)
+                        cv2.putText(img, f"LIT ({wm:.2f} x {lm:.2f} m)", (bx + int(8 * scale_factor), by + int(22 * scale_factor)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, f_scale_obj, (37, 99, 235), line_w_thin, cv2.LINE_AA)
                     elif "desk" in lbl or "bureau" in lbl or "table" in lbl:
-                        cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (16, 185, 129), 2)
-                        cv2.putText(img, f"BUREAU ({wm:.2f} x {lm:.2f} m)", (bx + 8, by + 20),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (16, 185, 129), 2, cv2.LINE_AA)
+                        cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (16, 185, 129), line_w_thin)
+                        cv2.putText(img, f"BUREAU ({wm:.2f} x {lm:.2f} m)", (bx + int(8 * scale_factor), by + int(22 * scale_factor)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, f_scale_obj, (16, 185, 129), line_w_thin, cv2.LINE_AA)
                     elif "chair" in lbl or "chaise" in lbl:
-                        cv2.circle(img, (bx + bw // 2, by + bh // 2), max(8, bw // 2), (217, 119, 6), 2)
-                        cv2.putText(img, "FAUTEUIL", (bx - 10, by - 6),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (217, 119, 6), 1, cv2.LINE_AA)
+                        cv2.circle(img, (bx + bw // 2, by + bh // 2), max(int(8 * scale_factor), bw // 2), (217, 119, 6), line_w_thin)
+                        cv2.putText(img, "FAUTEUIL", (bx - int(10 * scale_factor), by - int(6 * scale_factor)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, f_scale_obj_sub, (217, 119, 6), 1, cv2.LINE_AA)
         else:
-            # Fallback schematic drawing if no 3D points are available
             for obj in objects:
                 lbl = obj.get("label", "").lower()
                 cx, cy = obj["center_m"]
@@ -270,14 +278,17 @@ class BlueprintRenderer:
                 br = to_px(cx + wm / 2.0, cy - lm / 2.0)
                 bx, by = min(tl[0], br[0]), min(tl[1], br[1])
                 bw, bh = abs(br[0] - tl[0]), abs(br[1] - tl[1])
-                if bw > 10 and bh > 10:
-                    cv2.rectangle(img, (bx, by), (bx + bw, by + bh), furniture_pen, 2)
-                    cv2.putText(img, lbl.upper(), (bx + 5, by + 18),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.40, text_color, 1, cv2.LINE_AA)
+                if bw > int(10 * scale_factor) and bh > int(10 * scale_factor):
+                    cv2.rectangle(img, (bx, by), (bx + bw, by + bh), furniture_pen, line_w_thin)
+                    cv2.putText(img, lbl.upper(), (bx + int(5 * scale_factor), by + int(18 * scale_factor)),
+                                cv2.FONT_HERSHEY_SIMPLEX, f_scale_obj_sub, text_color, 1, cv2.LINE_AA)
 
         # ---------------------------------------------------------------------
         # 4. Multi-Tier Architectural Dimension Chains (Côtes ArchiCAD)
         # ---------------------------------------------------------------------
+        dim_tick = int(7 * scale_factor)
+        dim_font_scale = 0.58 * scale_factor
+
         def draw_dim_line(pt1, pt2, text, offset_vec, is_vertical=False):
             ox, oy = offset_vec
             p1 = (pt1[0] + ox, pt1[1] + oy)
@@ -285,117 +296,128 @@ class BlueprintRenderer:
 
             cv2.line(img, pt1, (p1[0] + int(ox * 0.25), p1[1] + int(oy * 0.25)), dim_sub, 1)
             cv2.line(img, pt2, (p2[0] + int(ox * 0.25), p2[1] + int(oy * 0.25)), dim_sub, 1)
-            cv2.line(img, p1, p2, dim_color, 2)
-            cv2.line(img, (p1[0] - 6, p1[1] + 6), (p1[0] + 6, p1[1] - 6), dim_color, 2)
-            cv2.line(img, (p2[0] - 6, p2[1] + 6), (p2[0] + 6, p2[1] - 6), dim_color, 2)
+            cv2.line(img, p1, p2, dim_color, line_w_thin)
+            cv2.line(img, (p1[0] - dim_tick, p1[1] + dim_tick), (p1[0] + dim_tick, p1[1] - dim_tick), dim_color, line_w_thin)
+            cv2.line(img, (p2[0] - dim_tick, p2[1] + dim_tick), (p2[0] + dim_tick, p2[1] - dim_tick), dim_color, line_w_thin)
 
-            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.60, 2)
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, dim_font_scale, line_w_thin)
             mid_x = (p1[0] + p2[0]) // 2
             mid_y = (p1[1] + p2[1]) // 2
 
+            pad = int(5 * scale_factor)
             if is_vertical:
-                cv2.rectangle(img, (mid_x - th - 12, mid_y - tw // 2 - 4), (mid_x + 4, mid_y + tw // 2 + 4), bg_color, -1)
-                cv2.putText(img, text, (mid_x - th - 8, mid_y + tw // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.58, dim_color, 2, cv2.LINE_AA)
+                cv2.rectangle(img, (mid_x - th - pad * 2, mid_y - tw // 2 - pad), (mid_x + pad, mid_y + tw // 2 + pad), bg_color, -1)
+                cv2.putText(img, text, (mid_x - th - pad, mid_y + tw // 2), cv2.FONT_HERSHEY_SIMPLEX, dim_font_scale, dim_color, line_w_thin, cv2.LINE_AA)
             else:
-                cv2.rectangle(img, (mid_x - tw // 2 - 6, mid_y - th - 6), (mid_x + tw // 2 + 6, mid_y + 4), bg_color, -1)
-                cv2.putText(img, text, (mid_x - tw // 2, mid_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.58, dim_color, 2, cv2.LINE_AA)
+                cv2.rectangle(img, (mid_x - tw // 2 - pad, mid_y - th - pad), (mid_x + tw // 2 + pad, mid_y + pad), bg_color, -1)
+                cv2.putText(img, text, (mid_x - tw // 2, mid_y - pad // 2), cv2.FONT_HERSHEY_SIMPLEX, dim_font_scale, dim_color, line_w_thin, cv2.LINE_AA)
+
+        dim_offset = int(48 * scale_factor)
 
         # Top Total Width Dimension
         p_top_l = to_px(min_xm, max_ym)
         p_top_r = to_px(max_xm, max_ym)
-        draw_dim_line(p_top_l, p_top_r, f"<  {total_width_m:.2f} m  >", (0, -wall_thick_px - 45))
+        draw_dim_line(p_top_l, p_top_r, f"<  {total_width_m:.2f} m  >", (0, -wall_thick_px - dim_offset))
 
         # Right Total Length Dimension
         p_bot_r = to_px(max_xm, min_ym)
-        draw_dim_line(p_top_r, p_bot_r, f"<  {total_length_m:.2f} m  >", (wall_thick_px + 45, 0), is_vertical=True)
+        draw_dim_line(p_top_r, p_bot_r, f"<  {total_length_m:.2f} m  >", (wall_thick_px + dim_offset, 0), is_vertical=True)
 
         # Bottom Width Dimension
         p_bot_l = to_px(min_xm, min_ym)
-        draw_dim_line(p_bot_l, p_bot_r, f"<  {total_width_m:.2f} m  >", (0, wall_thick_px + 45))
+        draw_dim_line(p_bot_l, p_bot_r, f"<  {total_width_m:.2f} m  >", (0, wall_thick_px + dim_offset))
 
         # Left Length Dimension
-        draw_dim_line(p_top_l, p_bot_l, f"<  {total_length_m:.2f} m  >", (-wall_thick_px - 45, 0), is_vertical=True)
+        draw_dim_line(p_top_l, p_bot_l, f"<  {total_length_m:.2f} m  >", (-wall_thick_px - dim_offset, 0), is_vertical=True)
 
         # ---------------------------------------------------------------------
         # 5. ArchiCAD Center Zone Stamp
         # ---------------------------------------------------------------------
         stamp_c = to_px((min_xm + max_xm) / 2.0, (min_ym + max_ym) / 2.0)
-        cv2.circle(img, (stamp_c[0], stamp_c[1] - 22), 20, dim_sub, 1)
-        cv2.circle(img, (stamp_c[0], stamp_c[1] - 22), 17, dim_sub, 1)
+        cv2.circle(img, (stamp_c[0], stamp_c[1] - int(24 * scale_factor)), int(22 * scale_factor), dim_sub, 1)
+        cv2.circle(img, (stamp_c[0], stamp_c[1] - int(24 * scale_factor)), int(18 * scale_factor), dim_sub, 1)
 
         txt_room = room_name.upper()
         txt_s = f"S = {area_m2:.2f} m²  |  HSP = {ceiling_height_m:.2f} m"
         txt_v = f"V = {volume_m3:.1f} m³  |  Sol : Parquet Chêne"
 
-        (tw1, _), _ = cv2.getTextSize(txt_room, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
-        (tw2, _), _ = cv2.getTextSize(txt_s, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
-        (tw3, _), _ = cv2.getTextSize(txt_v, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        f_stamp_title = 0.65 * scale_factor
+        f_stamp_sub1 = 0.50 * scale_factor
+        f_stamp_sub2 = 0.44 * scale_factor
 
-        cv2.putText(img, txt_room, (stamp_c[0] - tw1 // 2, stamp_c[1] + 12),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, text_color, 2, cv2.LINE_AA)
-        cv2.putText(img, txt_s, (stamp_c[0] - tw2 // 2, stamp_c[1] + 34),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, dim_color, 1, cv2.LINE_AA)
-        cv2.putText(img, txt_v, (stamp_c[0] - tw3 // 2, stamp_c[1] + 52),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, dim_sub, 1, cv2.LINE_AA)
+        (tw1, _), _ = cv2.getTextSize(txt_room, cv2.FONT_HERSHEY_SIMPLEX, f_stamp_title, line_w_thin)
+        (tw2, _), _ = cv2.getTextSize(txt_s, cv2.FONT_HERSHEY_SIMPLEX, f_stamp_sub1, 1)
+        (tw3, _), _ = cv2.getTextSize(txt_v, cv2.FONT_HERSHEY_SIMPLEX, f_stamp_sub2, 1)
+
+        cv2.putText(img, txt_room, (stamp_c[0] - tw1 // 2, stamp_c[1] + int(14 * scale_factor)),
+                    cv2.FONT_HERSHEY_SIMPLEX, f_stamp_title, text_color, line_w_thin, cv2.LINE_AA)
+        cv2.putText(img, txt_s, (stamp_c[0] - tw2 // 2, stamp_c[1] + int(38 * scale_factor)),
+                    cv2.FONT_HERSHEY_SIMPLEX, f_stamp_sub1, dim_color, line_w_thin, cv2.LINE_AA)
+        cv2.putText(img, txt_v, (stamp_c[0] - tw3 // 2, stamp_c[1] + int(58 * scale_factor)),
+                    cv2.FONT_HERSHEY_SIMPLEX, f_stamp_sub2, dim_sub, 1, cv2.LINE_AA)
 
         # ---------------------------------------------------------------------
         # 6. Professional ArchiCAD Cartouche (Bottom-Right Title Block)
         # ---------------------------------------------------------------------
-        cb_w = 480
-        cb_h = 140
-        cb_x = self.canvas_width - cb_w - 35
-        cb_y = self.canvas_height - cb_h - 25
+        cb_w = int(490 * scale_factor)
+        cb_h = int(145 * scale_factor)
+        cb_x = self.canvas_width - cb_w - int(35 * scale_factor)
+        cb_y = self.canvas_height - cb_h - int(25 * scale_factor)
 
         cv2.rectangle(img, (cb_x, cb_y), (cb_x + cb_w, cb_y + cb_h), cartouche_bg, -1)
-        cv2.rectangle(img, (cb_x, cb_y), (cb_x + cb_w, cb_y + cb_h), cartouche_border, 2)
+        cv2.rectangle(img, (cb_x, cb_y), (cb_x + cb_w, cb_y + cb_h), cartouche_border, line_w_thin)
         cv2.rectangle(img, (cb_x + 3, cb_y + 3), (cb_x + cb_w - 3, cb_y + cb_h - 3), dim_sub, 1)
 
-        cv2.line(img, (cb_x, cb_y + 36), (cb_x + cb_w, cb_y + 36), cartouche_border, 1)
-        cv2.line(img, (cb_x, cb_y + 88), (cb_x + cb_w, cb_y + 88), dim_sub, 1)
-        cv2.line(img, (cb_x + 245, cb_y + 36), (cb_x + 245, cb_y + cb_h), dim_sub, 1)
+        cv2.line(img, (cb_x, cb_y + int(38 * scale_factor)), (cb_x + cb_w, cb_y + int(38 * scale_factor)), cartouche_border, 1)
+        cv2.line(img, (cb_x, cb_y + int(92 * scale_factor)), (cb_x + cb_w, cb_y + int(92 * scale_factor)), dim_sub, 1)
+        cv2.line(img, (cb_x + int(250 * scale_factor), cb_y + int(38 * scale_factor)), (cb_x + int(250 * scale_factor), cb_y + cb_h), dim_sub, 1)
 
-        cv2.putText(img, project_name, (cb_x + 14, cb_y + 24),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, text_color, 2, cv2.LINE_AA)
+        f_cart_head = 0.52 * scale_factor
+        f_cart_lbl = 0.38 * scale_factor
+        f_cart_val = 0.44 * scale_factor
 
-        cv2.putText(img, "ESPACE :", (cb_x + 14, cb_y + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.38, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, room_name, (cb_x + 72, cb_y + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.42, text_color, 1, cv2.LINE_AA)
-        cv2.putText(img, "SURFACE :", (cb_x + 14, cb_y + 76), cv2.FONT_HERSHEY_SIMPLEX, 0.38, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, f"{area_m2:.2f} m²", (cb_x + 88, cb_y + 76), cv2.FONT_HERSHEY_SIMPLEX, 0.48, dim_color, 2, cv2.LINE_AA)
-        cv2.putText(img, "VOLUME :", (cb_x + 14, cb_y + 116), cv2.FONT_HERSHEY_SIMPLEX, 0.38, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, f"{volume_m3:.1f} m³", (cb_x + 88, cb_y + 116), cv2.FONT_HERSHEY_SIMPLEX, 0.42, text_color, 1, cv2.LINE_AA)
+        cv2.putText(img, project_name, (cb_x + int(14 * scale_factor), cb_y + int(26 * scale_factor)),
+                    cv2.FONT_HERSHEY_SIMPLEX, f_cart_head, text_color, line_w_thin, cv2.LINE_AA)
 
-        cv2.putText(img, "HSP (PLAFOND) :", (cb_x + 256, cb_y + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.36, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, f"{ceiling_height_m:.2f} m", (cb_x + 372, cb_y + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.44, text_color, 2, cv2.LINE_AA)
-        cv2.putText(img, "ÉCHELLE :", (cb_x + 256, cb_y + 76), cv2.FONT_HERSHEY_SIMPLEX, 0.36, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, "1 : 50 (Métrique)", (cb_x + 332, cb_y + 76), cv2.FONT_HERSHEY_SIMPLEX, 0.42, text_color, 1, cv2.LINE_AA)
-        cv2.putText(img, "SOURCE :", (cb_x + 256, cb_y + 116), cv2.FONT_HERSHEY_SIMPLEX, 0.36, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, "Relevé 3D Multi-Vues (80 Vues)", (cb_x + 322, cb_y + 116), cv2.FONT_HERSHEY_SIMPLEX, 0.36, furniture_pen, 1, cv2.LINE_AA)
+        cv2.putText(img, "ESPACE :", (cb_x + int(14 * scale_factor), cb_y + int(58 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_lbl, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, room_name, (cb_x + int(76 * scale_factor), cb_y + int(58 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_val, text_color, 1, cv2.LINE_AA)
+        cv2.putText(img, "SURFACE :", (cb_x + int(14 * scale_factor), cb_y + int(80 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_lbl, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, f"{area_m2:.2f} m²", (cb_x + int(92 * scale_factor), cb_y + int(80 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_val, dim_color, line_w_thin, cv2.LINE_AA)
+        cv2.putText(img, "VOLUME :", (cb_x + int(14 * scale_factor), cb_y + int(120 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_lbl, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, f"{volume_m3:.1f} m³", (cb_x + int(92 * scale_factor), cb_y + int(120 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_val, text_color, 1, cv2.LINE_AA)
+
+        cv2.putText(img, "HSP (PLAFOND) :", (cb_x + int(260 * scale_factor), cb_y + int(58 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_lbl, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, f"{ceiling_height_m:.2f} m", (cb_x + int(380 * scale_factor), cb_y + int(58 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_val, text_color, line_w_thin, cv2.LINE_AA)
+        cv2.putText(img, "ÉCHELLE :", (cb_x + int(260 * scale_factor), cb_y + int(80 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_lbl, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, "1 : 50 (Métrique)", (cb_x + int(336 * scale_factor), cb_y + int(80 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_val, text_color, 1, cv2.LINE_AA)
+        cv2.putText(img, "SOURCE :", (cb_x + int(260 * scale_factor), cb_y + int(120 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_lbl, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, "Relevé 3D Multi-Vues HD", (cb_x + int(326 * scale_factor), cb_y + int(120 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, f_cart_lbl, furniture_pen, 1, cv2.LINE_AA)
 
         # ---------------------------------------------------------------------
         # 7. North Arrow & Scale Bar
         # ---------------------------------------------------------------------
-        na_x = self.canvas_width - 70
-        na_y = 80
-        cv2.circle(img, (na_x, na_y), 24, dim_sub, 1)
-        pts_n = np.array([[na_x, na_y - 20], [na_x - 7, na_y + 5], [na_x, na_y + 2]], dtype=np.int32)
+        na_x = self.canvas_width - int(75 * scale_factor)
+        na_y = int(85 * scale_factor)
+        cv2.circle(img, (na_x, na_y), int(25 * scale_factor), dim_sub, 1)
+        pts_n = np.array([[na_x, na_y - int(21 * scale_factor)], [na_x - int(8 * scale_factor), na_y + int(6 * scale_factor)], [na_x, na_y + int(3 * scale_factor)]], dtype=np.int32)
         cv2.fillPoly(img, [pts_n], cartouche_border)
-        pts_s = np.array([[na_x, na_y - 20], [na_x + 7, na_y + 5], [na_x, na_y + 2]], dtype=np.int32)
+        pts_s = np.array([[na_x, na_y - int(21 * scale_factor)], [na_x + int(8 * scale_factor), na_y + int(6 * scale_factor)], [na_x, na_y + int(3 * scale_factor)]], dtype=np.int32)
         cv2.fillPoly(img, [pts_s], dim_sub)
-        cv2.putText(img, "N", (na_x - 5, na_y - 24), cv2.FONT_HERSHEY_SIMPLEX, 0.50, text_color, 2, cv2.LINE_AA)
+        cv2.putText(img, "N", (na_x - int(6 * scale_factor), na_y - int(25 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, 0.50 * scale_factor, text_color, line_w_thin, cv2.LINE_AA)
 
-        sb_x = 70
-        sb_y = self.canvas_height - 60
+        sb_x = int(75 * scale_factor)
+        sb_y = self.canvas_height - int(65 * scale_factor)
         scale_1m_px = int(1.0 * px_per_m)
         scale_2m_px = int(2.0 * px_per_m)
 
-        cv2.line(img, (sb_x, sb_y), (sb_x + scale_2m_px, sb_y), cartouche_border, 3)
-        cv2.line(img, (sb_x, sb_y - 6), (sb_x, sb_y + 6), cartouche_border, 2)
-        cv2.line(img, (sb_x + scale_1m_px, sb_y - 6), (sb_x + scale_1m_px, sb_y + 6), cartouche_border, 2)
-        cv2.line(img, (sb_x + scale_2m_px, sb_y - 6), (sb_x + scale_2m_px, sb_y + 6), cartouche_border, 2)
+        cv2.line(img, (sb_x, sb_y), (sb_x + scale_2m_px, sb_y), cartouche_border, line_w_thick)
+        cv2.line(img, (sb_x, sb_y - int(6 * scale_factor)), (sb_x, sb_y + int(6 * scale_factor)), cartouche_border, line_w_thin)
+        cv2.line(img, (sb_x + scale_1m_px, sb_y - int(6 * scale_factor)), (sb_x + scale_1m_px, sb_y + int(6 * scale_factor)), cartouche_border, line_w_thin)
+        cv2.line(img, (sb_x + scale_2m_px, sb_y - int(6 * scale_factor)), (sb_x + scale_2m_px, sb_y + int(6 * scale_factor)), cartouche_border, line_w_thin)
 
-        cv2.putText(img, "0", (sb_x - 4, sb_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, "1 m", (sb_x + scale_1m_px - 10, sb_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, "2 m", (sb_x + scale_2m_px - 10, sb_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, dim_sub, 1, cv2.LINE_AA)
-        cv2.putText(img, "ÉCHELLE MÉTRIQUE", (sb_x, sb_y + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.38, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, "0", (sb_x - int(5 * scale_factor), sb_y - int(10 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, 0.40 * scale_factor, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, "1 m", (sb_x + scale_1m_px - int(10 * scale_factor), sb_y - int(10 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, 0.40 * scale_factor, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, "2 m", (sb_x + scale_2m_px - int(10 * scale_factor), sb_y - int(10 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, 0.40 * scale_factor, dim_sub, 1, cv2.LINE_AA)
+        cv2.putText(img, "ÉCHELLE MÉTRIQUE", (sb_x, sb_y + int(24 * scale_factor)), cv2.FONT_HERSHEY_SIMPLEX, 0.40 * scale_factor, dim_sub, 1, cv2.LINE_AA)
 
         return img
