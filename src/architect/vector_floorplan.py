@@ -58,6 +58,7 @@ class ManhattanVectorFloorplan:
         self,
         points_3d: np.ndarray,      # (N, 3) 3D points in meters, where Z is height above floor
         ceiling_height_m: float = 2.50,
+        already_aligned: bool = False,
     ) -> VectorFloorplanResult:
         """
         Extracts a clean, closed, orthogonal vector floorplan from 3D points.
@@ -82,11 +83,17 @@ class ManhattanVectorFloorplan:
         pts_clean = pts_slice[inlier_box]
 
         # 3. Estimate dominant orientation theta to align with Manhattan axes
-        theta_rad = self._estimate_dominant_orientation(pts_clean)
-        cos_t = math.cos(-theta_rad)
-        sin_t = math.sin(-theta_rad)
-        rot_mat = np.array([[cos_t, -sin_t], [sin_t, cos_t]], dtype=np.float32)
-        pts_rot = pts_clean @ rot_mat.T
+        if already_aligned:
+            theta_rad = 0.0
+            pts_rot = pts_clean
+            inv_rot = np.eye(2, dtype=np.float32)
+        else:
+            theta_rad = self._estimate_dominant_orientation(pts_clean)
+            cos_t = math.cos(-theta_rad)
+            sin_t = math.sin(-theta_rad)
+            rot_mat = np.array([[cos_t, -sin_t], [sin_t, cos_t]], dtype=np.float32)
+            pts_rot = pts_clean @ rot_mat.T
+            inv_rot = np.array([[cos_t, sin_t], [-sin_t, cos_t]], dtype=np.float32)
 
         # 4. RANSAC Orthogonal Wall Extraction
         walls_x, walls_y = self._extract_orthogonal_walls(pts_rot)
@@ -95,8 +102,10 @@ class ManhattanVectorFloorplan:
         corners_rot = self._construct_closed_polygon(walls_x, walls_y, pts_rot)
 
         # Rotate corners back to original world frame
-        inv_rot = np.array([[cos_t, sin_t], [-sin_t, cos_t]], dtype=np.float32)
-        corners_m = [(float(p[0]), float(p[1])) for p in (np.array(corners_rot) @ inv_rot.T)]
+        if already_aligned:
+            corners_m = [(float(p[0]), float(p[1])) for p in corners_rot]
+        else:
+            corners_m = [(float(p[0]), float(p[1])) for p in (np.array(corners_rot) @ inv_rot.T)]
 
         # 6. Compute Polygon Metrics
         area_m2 = self._polygon_area(corners_m)

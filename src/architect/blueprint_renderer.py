@@ -217,8 +217,13 @@ class BlueprintRenderer:
             in_pts = np.array([to_px(x, y) for x, y in vector_result.corners], dtype=np.int32)
             ex_pts = np.array([to_px(x, y) for x, y in vector_result.exterior_corners], dtype=np.int32)
 
-            # Draw outer structural wall thickness
-            cv2.fillPoly(img, [ex_pts], wall_fill)
+            # Draw outer structural wall thickness ONLY in the wall border (between ex_pts and in_pts)
+            # NEVER overwrite the interior 3D points!
+            wall_mask = np.zeros((self.canvas_height, self.canvas_width), dtype=np.uint8)
+            cv2.fillPoly(wall_mask, [ex_pts], 255)
+            cv2.fillPoly(wall_mask, [in_pts], 0)
+            img[wall_mask == 255] = wall_fill
+
             if not has_projection or style == "pure_vector":
                 cv2.fillPoly(img, [in_pts], bg_color)
 

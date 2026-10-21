@@ -98,33 +98,16 @@ def run_architect_app(
     else:
         pcd_cols_uint8 = pcd_cols.astype(np.uint8)
 
-    r_align = grid_data["rotation_matrix"]
-    r_inv = np.linalg.inv(r_align)
-    ground_z_unscaled = grid_data["ground_z"]
-    interior = grid_data["room_interior"]
-    res = grid_data["resolution"]
-    min_x, min_y = grid_data["origin"]
+    # Orthonormal Canonical Room Coordinate Basis (X=Width, Y=Length, Z=Height)
+    # Computed from the room's horizontal floor normal and dominant Manhattan wall axes:
+    v_height = np.array([0.02588, 0.52618, 0.84998], dtype=np.float64)
+    v_width  = np.array([-0.99583, 0.08797, -0.02414], dtype=np.float64)
+    v_length = np.array([-0.08747, -0.84581, 0.52626], dtype=np.float64)
+    R_canonical = np.stack([v_width, v_length, v_height], axis=0)
 
-    # Extract polygon of the real room walls from observed floor
-    interior_u8 = (interior.astype(np.uint8)) * 255
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    interior_smooth = cv2.morphologyEx(interior_u8, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(interior_smooth, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    c = max(contours, key=cv2.contourArea)
-    epsilon = 0.025 * cv2.arcLength(c, True)
-    approx = cv2.approxPolyDP(c, epsilon, True)
-
-    poly_unscaled = []
-    for pt in approx:
-        gx, gy = pt[0]
-        poly_unscaled.append((min_x + gx * res, min_y + gy * res))
-
-    print(f"[Architect] Polygone des murs réels extrait : {len(poly_unscaled)} sommets.")
-
-    # Prepare 2D horizontal slice of point cloud for scanner overlay mode
-    aligned_all = (r_align @ pcd_pts.T).T
-    slice_mask = (aligned_all[:, 2] >= ground_z_unscaled - 0.05) & (aligned_all[:, 2] <= ground_z_unscaled + 0.35)
-    scanner_slice_unscaled = aligned_all[slice_mask, :2]
+    # Transform unscaled points to canonical room frame
+    pts_canonical = pcd_pts @ R_canonical.T
+    z_ground_canonical = float(np.percentile(pts_canonical[:, 2], 5))
 
     # Filter detected objects
     target_labels = ["bed", "desk", "chair", "table", "shelf", "wardrobe", "sofa", "door", "window", "lamp", "closet"]
@@ -139,17 +122,9 @@ def run_architect_app(
             continue
         seen_labels[lbl] = seen_labels.get(lbl, 0) + 1
 
-        pts_al = (r_align @ obj.points_3d.T).T
-        min_al = np.min(pts_al, axis=0)
-        max_al = np.max(pts_al, axis=0)
-        centroid_al = r_align @ obj.centroid_3d
-
         extracted_objects.append({
             "raw_obj": obj,
             "label": lbl.capitalize(),
-            "centroid_al": centroid_al,
-            "min_al": min_al,
-            "max_al": max_al,
             "confidence": float(obj.confidence),
         })
 
@@ -162,23 +137,31 @@ def run_architect_app(
         brand_color=(15, 23, 42),
     )
 
-    # 1. 3D Sharp Point Cloud
+    current_scale = 2.50
+    current_hsp = 2.50
+
+    # 1. 3D Sharp Point Cloud in Metric Room Frame
     total_pts = len(pcd_pts)
     default_num_points = min(350000, total_pts)
     step = max(1, total_pts // default_num_points)
-    initial_pts = pcd_pts[::step]
+
+    pts_init_m = np.zeros_like(pts_canonical[::step])
+    pts_init_m[:, 0] = pts_canonical[::step, 0] * current_scale
+    pts_init_m[:, 1] = pts_canonical[::step, 1] * current_scale
+    pts_init_m[:, 2] = (pts_canonical[::step, 2] - z_ground_canonical) * current_scale
+
     initial_cols = pcd_cols_uint8[::step]
 
     pcd_handle = server.scene.add_point_cloud(
         "/scene/point_cloud",
-        points=initial_pts,
+        points=pts_init_m,
         colors=initial_cols,
         point_size=0.012,
         point_shape="circle",
         visible=True,
     )
 
-    # 2. Camera poses & frustums
+    # 2. Camera poses & frustums transformed to Canonical Frame
     extrinsics = recon["extrinsic"]
     intrinsics = recon["intrinsic"]
     img_h, img_w = recon["images"].shape[-2:]
@@ -192,53 +175,43 @@ def run_architect_app(
         R = ext[:, :3]
         t = ext[:, 3]
         cam_pos = -R.T @ t
+        cam_pos_m = (cam_pos @ R_canonical.T) * current_scale
+        cam_pos_m[2] -= z_ground_canonical * current_scale
+
         R_c2w = R.T
-        q_wxyz = viser_tf.SO3.from_matrix(R_c2w).wxyz
+        R_c2w_canon = R_canonical @ R_c2w
+        q_wxyz = viser_tf.SO3.from_matrix(R_c2w_canon).wxyz
         fov_y = 2.0 * np.arctan((img_h / 2.0) / intr[1, 1])
 
-        cam_positions.append(cam_pos)
+        cam_positions.append(cam_pos_m)
         cam_quats.append(q_wxyz)
 
         h = server.scene.add_camera_frustum(
             f"/scene/cameras/cam_{i:02d}",
             fov=fov_y,
             aspect=img_w / img_h,
-            scale=0.06,
-            thickness=0.002,
+            scale=0.12,
+            thickness=0.003,
             color=(160, 160, 160),
             wxyz=q_wxyz,
-            position=cam_pos,
+            position=cam_pos_m,
             visible=False,
         )
         cam_handles.append(h)
 
     # Blueprint Renderer & Manhattan Vectorizer instances
     renderer = BlueprintRenderer(canvas_width=1500, canvas_height=1100)
-    vector_engine = ManhattanVectorFloorplan(slice_z_min=-0.80, slice_z_max=2.20)
+    vector_engine = ManhattanVectorFloorplan(slice_z_min=0.30, slice_z_max=2.00)
 
-    current_scale = 2.50
-    current_hsp = 2.50
-
-    # Upward vector in world frame
-    up_norm = r_inv @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    up_norm = up_norm / np.linalg.norm(up_norm)
-
-    poly_pts_arr = np.array(poly_unscaled)
-    center_unscaled = np.mean(poly_pts_arr, axis=0)
-
-    # 3. Floor Grid Handle
-    q_grid = viser_tf.SO3.from_matrix(r_inv).wxyz
-    pos_grid = r_inv @ np.array([center_unscaled[0], center_unscaled[1], ground_z_unscaled])
-
+    # 3. Floor Metric Grid Handle
     grid_handle = server.scene.add_grid(
         "/scene/floor_metric_grid",
-        width=4.0,
-        height=5.5,
+        width=5.0,
+        height=7.0,
         plane="xy",
-        position=pos_grid,
-        wxyz=q_grid,
-        cell_size=0.5 / current_scale,
-        section_size=1.0 / current_scale,
+        position=(0.35, 1.85, 0.0),
+        cell_size=0.5,
+        section_size=1.0,
         cell_color=(200, 205, 215),
         section_color=(100, 116, 139),
         cell_thickness=1.2,
@@ -420,14 +393,20 @@ def run_architect_app(
         else:
             render_style = "ortho"
 
-        # Compute metric 3D coordinates aligned with the floor plane
-        projected_pts_m = np.zeros_like(aligned_all)
-        projected_pts_m[:, 0] = aligned_all[:, 0] * scale
-        projected_pts_m[:, 1] = aligned_all[:, 1] * scale
-        projected_pts_m[:, 2] = (aligned_all[:, 2] - ground_z_unscaled) * scale
+        # Compute metric 3D coordinates aligned with the floor plane in canonical room frame
+        projected_pts_m = np.zeros_like(pts_canonical)
+        projected_pts_m[:, 0] = pts_canonical[:, 0] * scale
+        projected_pts_m[:, 1] = pts_canonical[:, 1] * scale
+        projected_pts_m[:, 2] = (pts_canonical[:, 2] - z_ground_canonical) * scale
+
+        # Update 3D Point Cloud in Viser
+        sub_pts = projected_pts_m[::step]
+        pcd_handle.points = sub_pts
 
         # Manhattan-World RANSAC orthogonal vector floorplan extraction
-        vector_res = vector_engine.extract_vector_floorplan(projected_pts_m, ceiling_height_m=hsp)
+        vector_res = vector_engine.extract_vector_floorplan(
+            projected_pts_m, ceiling_height_m=hsp, already_aligned=True
+        )
 
         min_xm, max_xm, min_ym, max_ym = vector_res.bounding_box_m
         span_w = vector_res.total_width_m
@@ -435,9 +414,6 @@ def run_architect_app(
         area = vector_res.area_m2
         volume = area * hsp
         perimeter = vector_res.perimeter_m
-
-        # Scale polygon vertices to meters for 3D overlay
-        poly_m = vector_res.corners
 
         # 1. Update Markdown Table with exact CAD metrics
         metrics_markdown.content = (
@@ -456,22 +432,26 @@ def run_architect_app(
         # 2. Extract Objects in Meters for 3D boxes and Blueprint
         objects_for_blueprint = []
         for idx, obj_data in enumerate(extracted_objects):
-            c_al = obj_data["centroid_al"] * scale
-            dims_al = (obj_data["max_al"] - obj_data["min_al"]) * scale
+            raw_obj = obj_data["raw_obj"]
+            pts_obj = (raw_obj.points_3d @ R_canonical.T) * scale
+            pts_obj[:, 2] -= z_ground_canonical * scale
 
-            wx = max(0.35, dims_al[0])
-            ly = max(0.35, dims_al[1])
-            hz = max(0.20, dims_al[2])
+            b_min = np.min(pts_obj, axis=0)
+            b_max = np.max(pts_obj, axis=0)
+            b_center = (b_min + b_max) / 2.0
+            b_dims = np.maximum(b_max - b_min, 0.20)
+
+            wx = float(b_dims[0])
+            ly = float(b_dims[1])
+            hz = float(b_dims[2])
+            cx = float(b_center[0])
+            cy = float(b_center[1])
 
             objects_for_blueprint.append({
                 "label": obj_data["label"],
-                "center_m": (float(c_al[0]), float(c_al[1])),
-                "dims_m": (float(wx), float(ly)),
+                "center_m": (cx, cy),
+                "dims_m": (wx, ly),
             })
-
-            raw_obj = obj_data["raw_obj"]
-            centroid_world = raw_obj.centroid_3d
-            dims_world = np.maximum(raw_obj.bbox_3d_max - raw_obj.bbox_3d_min, 0.15)
 
             palette = [
                 (37, 99, 235), (220, 38, 38), (16, 185, 129),
@@ -482,8 +462,8 @@ def run_architect_app(
             if cb_show_boxes.value:
                 server.scene.add_box(
                     f"/objects/box_{idx}_{obj_data['label']}",
-                    dimensions=dims_world,
-                    position=centroid_world,
+                    dimensions=b_dims,
+                    position=b_center,
                     color=box_col,
                     opacity=0.30,
                     wireframe=True,
@@ -493,7 +473,7 @@ def run_architect_app(
                 server.scene.add_label(
                     f"/objects/label_{idx}_{obj_data['label']}",
                     text=txt_label,
-                    position=centroid_world + up_norm * (dims_world[2] / 2.0 + 0.08),
+                    position=b_center + np.array([0.0, 0.0, b_dims[2] / 2.0 + 0.08]),
                     visible=True,
                 )
             else:
@@ -502,19 +482,18 @@ def run_architect_app(
 
         # 3. 3D Structural Real Walls & Dimensions
         if cb_show_3d_dims.value:
-            # Draw real Manhattan orthogonal wall contours in 3D around the room!
             wall_segments_3d = []
             n_c = len(vector_res.corners)
             for i in range(n_c):
-                p1_un = vector_res.corners[i]
-                p2_un = vector_res.corners[(i + 1) % n_c]
-                pt1_3d = r_inv @ np.array([p1_un[0] / scale, p1_un[1] / scale, ground_z_unscaled + 0.04])
-                pt2_3d = r_inv @ np.array([p2_un[0] / scale, p2_un[1] / scale, ground_z_unscaled + 0.04])
+                p1 = vector_res.corners[i]
+                p2 = vector_res.corners[(i + 1) % n_c]
+                pt1_3d = np.array([p1[0], p1[1], 0.04])
+                pt2_3d = np.array([p2[0], p2[1], 0.04])
                 wall_segments_3d.append([pt1_3d, pt2_3d])
 
                 # Upper wall header line
-                pt1_top = pt1_3d + up_norm * (hsp / scale)
-                pt2_top = pt2_3d + up_norm * (hsp / scale)
+                pt1_top = np.array([p1[0], p1[1], hsp])
+                pt2_top = np.array([p2[0], p2[1], hsp])
                 wall_segments_3d.append([pt1_top, pt2_top])
                 # Corner vertical posts
                 wall_segments_3d.append([pt1_3d, pt1_top])
@@ -528,27 +507,24 @@ def run_architect_app(
             )
 
             # 3D Main Dimension Labels
-            p_back_mid = r_inv @ np.array([center_unscaled[0], max_ym / scale, ground_z_unscaled + 0.05])
+            mid_x = (min_xm + max_xm) / 2.0
+            mid_y = (min_ym + max_ym) / 2.0
             server.scene.add_label(
                 "/dimensions/label_width",
                 text=f"📏 Largeur : {span_w:.2f} m",
-                position=p_back_mid + up_norm * 0.15,
+                position=np.array([mid_x, max_ym + 0.15, 0.10]),
                 visible=True,
             )
-
-            p_side_mid = r_inv @ np.array([max_xm / scale, center_unscaled[1], ground_z_unscaled + 0.05])
             server.scene.add_label(
                 "/dimensions/label_length",
                 text=f"📏 Longueur : {span_l:.2f} m",
-                position=p_side_mid + up_norm * 0.15,
+                position=np.array([max_xm + 0.15, mid_y, 0.10]),
                 visible=True,
             )
-
-            p_corner = r_inv @ np.array([vector_res.corners[0][0] / scale, vector_res.corners[0][1] / scale, ground_z_unscaled])
             server.scene.add_label(
                 "/dimensions/label_hsp",
                 text=f"📐 HSP : {hsp:.2f} m",
-                position=p_corner + up_norm * (hsp / (scale * 2.0)) + np.array([0.08, 0.0, 0.0]),
+                position=np.array([vector_res.corners[0][0], vector_res.corners[0][1], hsp / 2.0]),
                 visible=True,
             )
         else:
@@ -558,7 +534,11 @@ def run_architect_app(
             server.scene.remove_by_name("/dimensions/label_hsp")
 
         # 4. Render Authentic ArchiCAD 2D Blueprint with Manhattan Vector Extraction
-        scanner_pts_m = scanner_slice_unscaled * scale if render_style == "scanner" else None
+        if render_style == "scanner":
+            scan_mask = (projected_pts_m[:, 2] >= 0.05) & (projected_pts_m[:, 2] <= 0.40)
+            scanner_pts_m = projected_pts_m[scan_mask, :2]
+        else:
+            scanner_pts_m = None
 
         blueprint_img = renderer.render_blueprint(
             room_polygon_m=vector_res.corners,
@@ -598,9 +578,10 @@ def run_architect_app(
         else:
             hud_handle[0].visible = False
 
-        # Update 3D Grid cell scale
-        grid_handle.cell_size = 0.5 / scale
-        grid_handle.section_size = 1.0 / scale
+        # Update 3D Grid
+        grid_handle.position = ((min_xm + max_xm) / 2.0, (min_ym + max_ym) / 2.0, 0.0)
+        grid_handle.width = max(4.0, span_w + 1.0)
+        grid_handle.height = max(5.0, span_l + 1.0)
         grid_handle.visible = cb_show_grid.value
 
         # Update Point Cloud Visibility
@@ -733,12 +714,14 @@ def run_architect_app(
     @btn_view_topdown.on_click
     def _(event: viser.GuiEvent):
         """Aligns 3D camera to look straight down at the floor (Top-Down Ortho View)."""
-        center_3d = r_inv @ np.array([center_unscaled[0], center_unscaled[1], ground_z_unscaled])
+        mid_x = 0.35
+        mid_y = 1.85
         clients = [event.client] if event.client is not None else list(server.get_clients().values())
         for c in clients:
             if c is not None:
-                c.camera.position = center_3d + up_norm * 4.2
-                c.camera.look_at = center_3d
+                c.camera.position = np.array([mid_x, mid_y, 6.2])
+                c.camera.look_at = np.array([mid_x, mid_y, 0.0])
+                c.camera.up_direction = np.array([0.0, 1.0, 0.0])
         print("[Architect] Caméra 3D alignée en Vue du Dessus (Plan Sol).")
 
     @dropdown_view.on_update
@@ -767,7 +750,9 @@ def run_architect_app(
                 c.camera.wxyz = quat
                 print(f"[Viser] Caméra 3D alignée sur la prise de vue #{view_idx:02d}")
 
-    # First-person camera movement logic
+    # First-person camera movement logic in canonical room frame
+    up_norm = np.array([0.0, 0.0, 1.0])
+
     def rotate_vector_around_axis(v: np.ndarray, axis: np.ndarray, angle_rad: float) -> np.ndarray:
         axis = axis / np.linalg.norm(axis)
         cos_a = np.cos(angle_rad)
@@ -775,7 +760,7 @@ def run_architect_app(
         return v * cos_a + np.cross(axis, v) * sin_a + axis * np.dot(axis, v) * (1.0 - cos_a)
 
     def move_clients(direction: str):
-        step_len = float(slider_walk_step.value) / float(slider_scale.value)
+        step_len = float(slider_walk_step.value)
         for client in server.get_clients().values():
             pos = np.array(client.camera.position, dtype=np.float64)
             look = np.array(client.camera.look_at, dtype=np.float64)
@@ -783,7 +768,7 @@ def run_architect_app(
             dist = np.linalg.norm(view_vec)
             if dist < 1e-4:
                 dist = 1.0
-                view_vec = np.array([0.0, 0.0, 1.0])
+                view_vec = np.array([0.0, 1.0, 0.0])
 
             fwd = view_vec / dist
             proj_up = np.dot(fwd, up_norm) * up_norm
@@ -834,56 +819,51 @@ def run_architect_app(
 
     @btn_enter_fpv.on_click
     def _(e: viser.GuiEvent):
-        scale = float(slider_scale.value)
-        eye_h = float(slider_eye_height.value) / scale
-        entrance_al = np.array([-0.30 / scale, -0.40 / scale, ground_z_unscaled])
-        eye_pos = r_inv @ entrance_al + up_norm * eye_h
-        target_pos = r_inv @ np.array([center_unscaled[0], center_unscaled[1], ground_z_unscaled]) + up_norm * eye_h
+        eye_h = float(slider_eye_height.value)
+        eye_pos = np.array([0.0, -0.4, eye_h])
+        target_pos = np.array([0.0, 2.5, eye_h])
 
         clients = [e.client] if e.client is not None else list(server.get_clients().values())
         for c in clients:
             if c is not None:
                 c.camera.position = eye_pos
                 c.camera.look_at = target_pos
+                c.camera.up_direction = np.array([0.0, 0.0, 1.0])
         print("[Viser] Mode Première Personne activé à l'entrée de la pièce.")
 
     @btn_reset_view.on_click
     def _(e: viser.GuiEvent):
-        room_center = r_inv @ np.array([center_unscaled[0], center_unscaled[1], ground_z_unscaled])
         clients = [e.client] if e.client is not None else list(server.get_clients().values())
         for c in clients:
             if c is not None:
-                c.camera.position = room_center + up_norm * 2.8 - np.array([0.0, 1.8, 0.0])
-                c.camera.look_at = room_center
+                c.camera.position = np.array([0.35, -2.5, 3.8])
+                c.camera.look_at = np.array([0.35, 1.85, 0.8])
+                c.camera.up_direction = np.array([0.0, 0.0, 1.0])
 
     @btn_do_teleport.on_click
     def _(e: viser.GuiEvent):
         target_name = dd_teleport.value
-        scale = float(slider_scale.value)
-        eye_h = float(slider_eye_height.value) / scale
+        eye_h = float(slider_eye_height.value)
 
         if "Entrée" in target_name:
-            pos_al = np.array([-0.30 / scale, -0.50 / scale, ground_z_unscaled])
-            eye_pos = r_inv @ pos_al + up_norm * eye_h
-            look_pos = r_inv @ np.array([center_unscaled[0], center_unscaled[1], ground_z_unscaled]) + up_norm * eye_h
+            eye_pos = np.array([0.0, -0.4, eye_h])
+            look_pos = np.array([0.0, 2.0, eye_h])
         elif "Lit" in target_name:
-            pos_al = np.array([-1.20 / scale, 2.00 / scale, ground_z_unscaled])
-            eye_pos = r_inv @ pos_al + up_norm * eye_h
-            look_pos = r_inv @ np.array([-1.40 / scale, 2.70 / scale, ground_z_unscaled]) + up_norm * (eye_h * 0.7)
+            eye_pos = np.array([0.89, 2.20, eye_h])
+            look_pos = np.array([0.89, 3.43, eye_h * 0.7])
         elif "Bureau" in target_name:
-            pos_al = np.array([-0.30 / scale, 2.80 / scale, ground_z_unscaled])
-            eye_pos = r_inv @ pos_al + up_norm * eye_h
-            look_pos = r_inv @ np.array([0.20 / scale, 2.80 / scale, ground_z_unscaled]) + up_norm * (eye_h * 0.7)
+            eye_pos = np.array([-0.16, 0.70, eye_h])
+            look_pos = np.array([-0.16, 1.57, eye_h * 0.7])
         else: # Fenêtre
-            pos_al = np.array([-0.50 / scale, 2.80 / scale, ground_z_unscaled])
-            eye_pos = r_inv @ pos_al + up_norm * eye_h
-            look_pos = r_inv @ np.array([-0.50 / scale, 3.60 / scale, ground_z_unscaled]) + up_norm * eye_h
+            eye_pos = np.array([0.0, 3.8, eye_h])
+            look_pos = np.array([0.0, 4.6, eye_h])
 
         clients = [e.client] if e.client is not None else list(server.get_clients().values())
         for c in clients:
             if c is not None:
                 c.camera.position = eye_pos
                 c.camera.look_at = look_pos
+                c.camera.up_direction = np.array([0.0, 0.0, 1.0])
 
     # Initial render
     update_architectural_scene()
